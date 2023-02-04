@@ -1,0 +1,124 @@
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Host;
+using System;
+using CodeHollow.AzureBillingApi;
+using SendGrid;
+using SendGrid.Helpers.Mail;
+ 
+namespace AzureBillingFunction
+{
+    /// <summary>
+    /// Time triggered function that creates a weekly billing report and sends it via mail
+    /// </summary>
+    public static class AzureBillingFunction
+    {
+        internal const string CURRENCY_CHAR = "&euro;";
+        const string TRIGGER = "0 0 9 * * 1";
+ 
+        const string FROM = "billingapi@codehollow.com";
+        const string FROM_NAME = "Azure Billing API";
+        const string TO = "[MAIL]";
+        const string TO_NAME = "[NAME]";
+        const string APIKEY = "[SENDGRIDAPIKEY]";
+ 
+        [FunctionName("AzureBillingFunction")]
+        public static void Run([TimerTrigger(TRIGGER)]TimerInfo myTimer, TraceWriter log, ExecutionContext context)
+        {
+            log.Info($"C# Timer trigger function executed at: {DateTime.Now}");
+            try
+            {
+                Client c = new Client("mytenant.onmicrosoft.com", "[CLIENTID]",
+                    "[CLIENTSECRET]", "[SUBSCRIPTIONID]", "http://[REDIRECTURL]");
+ 
+                var path = System.IO.Path.Combine(context.FunctionAppDirectory, "MailReport.html");
+                string html = BillingReportGenerator.GetHtmlReport(c, path);
+ 
+                SendMail(TO, TO_NAME, html);
+            }
+            catch(Exception ex)
+            {
+                log.Error(ex.Message, ex);
+            }
+        }
+ 
+        private static void SendMail(string toMail, string toName, string html)
+        {
+            var client = new SendGridClient(APIKEY);
+            var from = new EmailAddress(FROM, FROM_NAME);
+            var to = new EmailAddress(toMail, toName);
+ 
+            var msg = MailHelper.CreateSingleEmail(from, to, "Weekly Azure Billing Report", "", html);
+            client.SendEmailAsync(msg).Wait();
+        }
+    }
+}
+using CodeHollow.AzureBillingApi;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+ 
+namespace AzureBillingFunction
+{
+    public static class BillingReportGenerator
+    {
+        public static string GetHtmlReport(Client c, string htmlFile)
+        {
+            var startdate = DateTime.Now.AddDays(-7); // set start date to last monday
+            var enddate = DateTime.Now.AddDays(-1); // set end date to last day which is sunday
+ 
+            var allcosts = c.GetResourceCosts("MS-AZR-0003P", "EUR", "en-US", "AT", startdate, enddate,
+            CodeHollow.AzureBillingApi.Usage.AggregationGranularity.Daily, true);
+ 
+            var costsByResourceGroup = allcosts.GetCostsByResourceGroup();
+ 
+ 
+            string cbr = CostsByResourceGroup(costsByResourceGroup);
+            string costDetails = CostsDetails(costsByResourceGroup);
+ 
+            string html = System.IO.File.ReadAllText(htmlFile);
+            html = html.Replace("{costsPerResourceGroup}", cbr);
+            html = html.Replace("{costsDetails}", costDetails);
+            html = html.Replace("{date}", startdate.ToShortDateString() + " - " + enddate.ToShortDateString());
+ 
+            return html.ToString();
+        }
+ 
+        private static string CostsDetails(Dictionary<string, IEnumerable<ResourceCosts>> costsByResourceGroup)
+        {
+            var costs = from cbrg in costsByResourceGroup
+                        from costsByResourceName in cbrg.Value.GetCostsByResourceName()
+                        from costsByMeterName in costsByResourceName.Value.GetCostsByMeterName()
+                        select new
+                        {
+                            ResourceGroup = cbrg.Key,
+                            Resource = costsByResourceName.Key,
+                            MeterName = costsByMeterName.Key,
+                            Costs = costsByMeterName.Value
+                        };
+ 
+            var data = costs.Select(x => $"<tr><td>{x.ResourceGroup}</td><td>{x.Resource}</td><td>{x.MeterName}</td><td>{x.Costs.GetTotalUsage().ToHtml()}</td><td>{x.Costs.GetTotalCosts().ToHtml(true)}</td></tr>");
+            return string.Concat(data);
+        }
+ 
+        private static string CostsByResourceGroup(Dictionary<string, IEnumerable<ResourceCosts>> costsByResourceGroup)
+        {
+            var data = costsByResourceGroup.Select(x => $"<tr><td>{x.Key}</td><td>{x.Value.GetTotalCosts().ToHtml(true)}</td></tr>");
+            return string.Concat(data);
+        }
+    }
+}
+view sourceprint?
+namespace AzureBillingFunction
+{
+    public static class Extensions
+    {
+        public static string ToHtml(this double value, bool currency = false)
+        {
+            if (currency)
+                return value.ToString("0.00") + " " + AzureBillingFunction.CURRENCY_CHAR;
+            return value.ToString("0.################");
+        }
+    }
+}
